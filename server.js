@@ -9,10 +9,11 @@ const app = express()
 app.use(cors())
 app.use(express.json())
 
-const GUMROAD_PRODUCT_PERMALINK = process.env.GUMROAD_PRODUCT_ID
-const MAX_DEVICES               = parseInt(process.env.MAX_DEVICES_PER_LICENSE) || 2
-const PORT                      = parseInt(process.env.PORT) || 3001
-const ACTIVATIONS_FILE          = path.join(__dirname, 'activations.json')
+// GUMROAD_PRODUCT_ID = "Vc5fvNvynz6O4N_PzVShSA==" (the actual product_id, NOT permalink)
+const GUMROAD_PRODUCT_ID  = process.env.GUMROAD_PRODUCT_ID
+const MAX_DEVICES          = parseInt(process.env.MAX_DEVICES_PER_LICENSE) || 2
+const PORT                 = parseInt(process.env.PORT) || 3001
+const ACTIVATIONS_FILE     = path.join(__dirname, 'activations.json')
 
 let inMemoryActivations = {}
 
@@ -44,7 +45,7 @@ app.post('/api/verify-license', async (req, res) => {
     return res.status(400).json({ success: false, message: 'License key and device ID are required.' })
   }
 
-  if (!GUMROAD_PRODUCT_PERMALINK) {
+  if (!GUMROAD_PRODUCT_ID) {
     return res.status(500).json({ success: false, message: 'Server config error: GUMROAD_PRODUCT_ID not set.' })
   }
 
@@ -53,13 +54,14 @@ app.post('/api/verify-license', async (req, res) => {
   let licenseData = null
 
   try {
+    // Use product_id (not product_permalink) — required for this product
     const params = new URLSearchParams({
-      product_permalink: GUMROAD_PRODUCT_PERMALINK,
+      product_id: GUMROAD_PRODUCT_ID,
       license_key: cleanKey,
       increment_uses_count: 'false'
     })
 
-    console.log('Verifying:', GUMROAD_PRODUCT_PERMALINK, cleanKey.slice(0, 8) + '...')
+    console.log('Verifying with Gumroad | product_id:', GUMROAD_PRODUCT_ID, '| key:', cleanKey.slice(0, 8) + '...')
 
     const response = await axios.post(
       'https://api.gumroad.com/v2/licenses/verify',
@@ -67,13 +69,13 @@ app.post('/api/verify-license', async (req, res) => {
       { headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, timeout: 10000 }
     )
 
-    console.log('Gumroad:', response.status, JSON.stringify(response.data))
+    console.log('Gumroad response:', response.status, JSON.stringify(response.data))
     licenseData = response.data
     if (response.data.success === true) gumroadValid = true
 
   } catch (err) {
     if (err.response) {
-      console.log('Gumroad error:', err.response.status, JSON.stringify(err.response.data))
+      console.log('Gumroad HTTP error:', err.response.status, JSON.stringify(err.response.data))
       if (err.response.status === 404) {
         return res.json({ success: false, message: 'Invalid license key. Please check and try again.' })
       }
@@ -86,10 +88,11 @@ app.post('/api/verify-license', async (req, res) => {
 
   if (!gumroadValid) {
     const msg = licenseData?.message || 'Invalid license key.'
-    console.warn('Rejected:', cleanKey.slice(0, 8), msg)
+    console.warn('License rejected:', cleanKey.slice(0, 8), '|', msg)
     return res.json({ success: false, message: msg })
   }
 
+  // Device limit check
   const activations = loadActivations()
   const record = activations[cleanKey] || { devices: [] }
 
@@ -99,7 +102,10 @@ app.post('/api/verify-license', async (req, res) => {
   }
 
   if (record.devices.length >= MAX_DEVICES) {
-    return res.json({ success: false, message: `License already used on ${MAX_DEVICES} device(s). Contact support to reset.` })
+    return res.json({
+      success: false,
+      message: `License already used on ${MAX_DEVICES} device(s). Contact support to reset.`
+    })
   }
 
   record.devices.push(deviceId)
@@ -108,12 +114,17 @@ app.post('/api/verify-license', async (req, res) => {
   activations[cleanKey] = record
   saveActivations(activations)
 
-  console.log('Activated:', cleanKey.slice(0, 8), '| Devices:', record.devices.length)
+  console.log('New activation:', cleanKey.slice(0, 8), '| Total devices:', record.devices.length)
   return res.json({ success: true, plan: 'premium', premiumUnlocked: true })
 })
 
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', product: GUMROAD_PRODUCT_PERMALINK || 'NOT SET', activations: Object.keys(inMemoryActivations).length })
+  res.json({
+    status: 'ok',
+    product_id: GUMROAD_PRODUCT_ID || 'NOT SET',
+    activations: Object.keys(inMemoryActivations).length,
+    timestamp: new Date().toISOString()
+  })
 })
 
 app.get('/', (req, res) => {
@@ -122,5 +133,5 @@ app.get('/', (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`TweakShift License Server on port ${PORT}`)
-  console.log(`Product: ${GUMROAD_PRODUCT_PERMALINK || 'NOT SET'}`)
+  console.log(`Product ID: ${GUMROAD_PRODUCT_ID || 'NOT SET'}`)
 })
