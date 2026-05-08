@@ -27,31 +27,23 @@ function makeAuthHeader(method, path) {
   const contentType = method === 'GET' ? '' : 'application/x-www-form-urlencoded'
   const stringToSign = `${method}\n${contentMd5}\n${contentType}\n${date}\n${path}`
   const signature = crypto.createHmac('sha256', FREEMIUS_SECRET_KEY).update(stringToSign).digest('base64')
-  return {
-    date,
-    auth: `FS ${FREEMIUS_PRODUCT_ID}:${FREEMIUS_PUBLIC_KEY}:${signature}`
-  }
+  return { date, auth: `FS ${FREEMIUS_PRODUCT_ID}:${FREEMIUS_PUBLIC_KEY}:${signature}` }
 }
 
 async function verifyWithFreemius({ licenseKey }) {
   if (!FREEMIUS_PRODUCT_ID || !FREEMIUS_SECRET_KEY) {
     throw new Error('Freemius environment variables are not configured.')
   }
-
- const path = `/v1/products/${FREEMIUS_PRODUCT_ID}/licenses/${encodeURIComponent(licenseKey)}.json`
+  const encodedKey = encodeURIComponent(licenseKey)
+  const path = `/v1/products/${FREEMIUS_PRODUCT_ID}/licenses/${encodedKey}.json`
+  const endpoint = `https://api.freemius.com${path}`
   const { date, auth } = makeAuthHeader('GET', path)
-
   const response = await fetch(endpoint, {
     method: 'GET',
-    headers: {
-      'Authorization': auth,
-      'Date': date,
-    },
+    headers: { 'Authorization': auth, 'Date': date },
   })
-
   const payload = await response.json().catch(() => ({}))
   console.log('Freemius response:', JSON.stringify(payload))
-
   if (!response.ok && !payload.id) {
     throw new Error(payload.error?.message || payload.message || `Freemius returned ${response.status}`)
   }
@@ -61,7 +53,6 @@ async function verifyWithFreemius({ licenseKey }) {
 function normalizeFreemius(payload, licenseKey) {
   const isActive = payload.is_active === true || payload.activated > 0
   const isExpired = payload.expiration && payload.expiration !== 'lifetime' && new Date(payload.expiration).getTime() < Date.now()
-
   return {
     valid: Boolean(isActive && !isExpired),
     licenseKey: mask(licenseKey),
@@ -81,7 +72,6 @@ app.post('/api/license/verify', async (req, res) => {
     const licenseKey = clean(req.body.licenseKey || req.body.license_key)
     const email = clean(req.body.email)
     if (!licenseKey) return res.status(400).json({ valid: false, error: 'License key is required.' })
-
     const payload = await verifyWithFreemius({ licenseKey })
     const normalized = normalizeFreemius(payload, licenseKey)
     if (!normalized.valid) return res.status(403).json({ ...normalized, error: 'License is inactive, expired, or not valid.' })
