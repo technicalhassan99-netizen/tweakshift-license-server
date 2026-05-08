@@ -27,34 +27,41 @@ async function verifyWithFreemius({ licenseKey }) {
     throw new Error('Freemius environment variables are not configured on Render yet.')
   }
 
-  const endpoint = `${FREEMIUS_API_BASE.replace(/\/$/, '')}/products/${FREEMIUS_PRODUCT_ID}/licenses/${licenseKey}.json?fields=id,secret_key,quota,activated,activated_local,expiration,is_active`
+  const endpoint = `${FREEMIUS_API_BASE.replace(/\/$/, '')}/products/${FREEMIUS_PRODUCT_ID}/licenses/activations.json`
+
+  const body = new URLSearchParams({
+    license_key: licenseKey,
+  }).toString()
 
   const response = await fetch(endpoint, {
-    method: 'GET',
+    method: 'POST',
     headers: {
-      'Authorization': `Bearer ${FREEMIUS_SECRET_KEY}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'Authorization': `Basic ${Buffer.from(`sk:${FREEMIUS_SECRET_KEY}`).toString('base64')}`,
     },
+    body,
   })
 
   const payload = await response.json().catch(() => ({}))
   console.log('Freemius response:', JSON.stringify(payload))
 
-  if (!response.ok) {
+  if (!response.ok && !payload.license) {
     throw new Error(payload.error || payload.message || `Freemius returned ${response.status}`)
   }
   return payload
 }
 
 function normalizeFreemius(payload, licenseKey) {
-  const isActive = payload.is_active === true || payload.activated > 0
-  const isExpired = payload.expiration && new Date(payload.expiration).getTime() < Date.now()
+  const license = payload.license || payload
+  const isActive = license.is_active === true || license.activated > 0 || payload.install_id > 0
+  const isExpired = license.expiration && license.expiration !== 'lifetime' && new Date(license.expiration).getTime() < Date.now()
 
   return {
     valid: Boolean(isActive && !isExpired),
     licenseKey: mask(licenseKey),
-    plan: payload.plan_name || 'Premium',
-    customerEmail: payload.customer_email || payload.email || '',
-    expiresAt: payload.expiration || null,
+    plan: license.plan_name || 'Premium',
+    customerEmail: license.customer_email || payload.user_email || '',
+    expiresAt: license.expiration || null,
     source: 'freemius-render-proxy',
   }
 }
