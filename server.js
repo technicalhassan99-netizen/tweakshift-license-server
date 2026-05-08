@@ -38,8 +38,7 @@ async function verifyWithFreemius({ licenseKey }) {
     throw new Error('Freemius environment variables are not configured.')
   }
 
-  const path = `/v1/products/${FREEMIUS_PRODUCT_ID}/licenses/${licenseKey}.json`
-  const endpoint = `https://api.freemius.com${path}`
+ const path = `/v1/products/${FREEMIUS_PRODUCT_ID}/licenses/${encodeURIComponent(licenseKey)}.json`
   const { date, auth } = makeAuthHeader('GET', path)
 
   const response = await fetch(endpoint, {
