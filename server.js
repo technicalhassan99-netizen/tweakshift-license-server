@@ -24,7 +24,7 @@ function mask(key) {
 function makeAuthHeader(method, path) {
   const date = new Date().toUTCString()
   const contentMd5 = ''
-  const contentType = 'application/x-www-form-urlencoded'
+  const contentType = method === 'GET' ? '' : 'application/x-www-form-urlencoded'
   const stringToSign = `${method}\n${contentMd5}\n${contentType}\n${date}\n${path}`
   const signature = crypto.createHmac('sha256', FREEMIUS_SECRET_KEY).update(stringToSign).digest('base64')
   return {
@@ -38,45 +38,37 @@ async function verifyWithFreemius({ licenseKey }) {
     throw new Error('Freemius environment variables are not configured.')
   }
 
-  const path = `/v1/products/${FREEMIUS_PRODUCT_ID}/licenses/activations.json`
+  const path = `/v1/products/${FREEMIUS_PRODUCT_ID}/licenses/${licenseKey}.json`
   const endpoint = `https://api.freemius.com${path}`
-  const { date, auth } = makeAuthHeader('POST', path)
-
-  const body = new URLSearchParams({
-    license_key: licenseKey,
-    plugin_id: FREEMIUS_PRODUCT_ID,
-  }).toString()
+  const { date, auth } = makeAuthHeader('GET', path)
 
   const response = await fetch(endpoint, {
-    method: 'POST',
+    method: 'GET',
     headers: {
-      'Content-Type': 'application/x-www-form-urlencoded',
       'Authorization': auth,
       'Date': date,
     },
-    body,
   })
 
   const payload = await response.json().catch(() => ({}))
   console.log('Freemius response:', JSON.stringify(payload))
 
-  if (!response.ok && !payload.install_id) {
+  if (!response.ok && !payload.id) {
     throw new Error(payload.error?.message || payload.message || `Freemius returned ${response.status}`)
   }
   return payload
 }
 
 function normalizeFreemius(payload, licenseKey) {
-  const license = payload.license || payload
-  const isActive = license.is_active === true || license.activated > 0 || payload.install_id > 0
-  const isExpired = license.expiration && license.expiration !== 'lifetime' && new Date(license.expiration).getTime() < Date.now()
+  const isActive = payload.is_active === true || payload.activated > 0
+  const isExpired = payload.expiration && payload.expiration !== 'lifetime' && new Date(payload.expiration).getTime() < Date.now()
 
   return {
     valid: Boolean(isActive && !isExpired),
     licenseKey: mask(licenseKey),
-    plan: license.plan_name || 'Premium',
-    customerEmail: license.customer_email || payload.user_email || '',
-    expiresAt: license.expiration || null,
+    plan: payload.plan_name || 'Premium',
+    customerEmail: payload.customer_email || payload.user_email || '',
+    expiresAt: payload.expiration || null,
     source: 'freemius-rest',
   }
 }
