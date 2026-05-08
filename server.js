@@ -43,7 +43,7 @@ async function activateWithFreemius({ licenseKey, email }) {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': `Bearer ${FREEMIUS_SECRET_KEY}`,
+     'Authorization': `Basic ${Buffer.from(`:${FREEMIUS_SECRET_KEY}`).toString('base64')}`,
     },
     body: JSON.stringify(body),
   })
