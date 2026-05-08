@@ -9,6 +9,7 @@ const FREEMIUS_API_BASE = process.env.FREEMIUS_API_BASE || ''
 const FREEMIUS_PRODUCT_ID = process.env.FREEMIUS_PRODUCT_ID || ''
 const FREEMIUS_PUBLIC_KEY = process.env.FREEMIUS_PUBLIC_KEY || ''
 const FREEMIUS_SECRET_KEY = process.env.FREEMIUS_SECRET_KEY || ''
+const FREEMIUS_API_TOKEN = process.env.FREEMIUS_API_TOKEN || ''
 
 app.use(cors({ origin: '*', methods: ['GET', 'POST'] }))
 app.use(express.json({ limit: '64kb' }))
@@ -23,7 +24,7 @@ function mask(key) {
 }
 
 async function verifyWithFreemius({ licenseKey }) {
-  if (!FREEMIUS_API_BASE || !FREEMIUS_PRODUCT_ID || !FREEMIUS_SECRET_KEY) {
+  if (!FREEMIUS_API_BASE || !FREEMIUS_PRODUCT_ID || !FREEMIUS_API_TOKEN) {
     throw new Error('Freemius environment variables are not configured on Render yet.')
   }
 
@@ -34,16 +35,11 @@ async function verifyWithFreemius({ licenseKey }) {
     plugin_id: 29310,
   }).toString()
 
-  const timestamp = new Date().toUTCString()
-  const stringToSign = `${timestamp}POST/v1/products/${FREEMIUS_PRODUCT_ID}/licenses/activations.json`
-  const signature = crypto.createHmac('sha256', FREEMIUS_SECRET_KEY).update(stringToSign).digest('base64')
-  const authHeader = `FS ${FREEMIUS_PRODUCT_ID}:${FREEMIUS_PUBLIC_KEY}:${timestamp}:${signature}`
-
   const response = await fetch(endpoint, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/x-www-form-urlencoded',
-      'Authorization': authHeader,
+      'Authorization': `Bearer ${FREEMIUS_API_TOKEN}`,
     },
     body,
   })
