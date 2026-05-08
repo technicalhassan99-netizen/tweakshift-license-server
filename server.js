@@ -1,15 +1,20 @@
 import express from 'express'
 import cors from 'cors'
 import crypto from 'crypto'
+import Freemius from '@freemius/sdk'
 
 const app = express()
 const PORT = process.env.PORT || 10000
 const APP_SHARED_SECRET = process.env.APP_SHARED_SECRET || ''
-const FREEMIUS_API_BASE = process.env.FREEMIUS_API_BASE || ''
 const FREEMIUS_PRODUCT_ID = process.env.FREEMIUS_PRODUCT_ID || ''
 const FREEMIUS_PUBLIC_KEY = process.env.FREEMIUS_PUBLIC_KEY || ''
 const FREEMIUS_SECRET_KEY = process.env.FREEMIUS_SECRET_KEY || ''
-const FREEMIUS_API_TOKEN = process.env.FREEMIUS_API_TOKEN || ''
+
+const fs = new Freemius({
+  productId: FREEMIUS_PRODUCT_ID,
+  publicKey: FREEMIUS_PUBLIC_KEY,
+  secretKey: FREEMIUS_SECRET_KEY,
+})
 
 app.use(cors({ origin: '*', methods: ['GET', 'POST'] }))
 app.use(express.json({ limit: '64kb' }))
@@ -23,51 +28,6 @@ function mask(key) {
   return key.slice(0, 4) + '...' + key.slice(-4)
 }
 
-async function verifyWithFreemius({ licenseKey }) {
-  if (!FREEMIUS_API_BASE || !FREEMIUS_PRODUCT_ID || !FREEMIUS_API_TOKEN) {
-    throw new Error('Freemius environment variables are not configured on Render yet.')
-  }
-
-  const endpoint = `${FREEMIUS_API_BASE.replace(/\/$/, '')}/products/${FREEMIUS_PRODUCT_ID}/licenses/activations.json`
-
-  const body = new URLSearchParams({
-    license_key: licenseKey,
-    plugin_id: 29310,
-  }).toString()
-
-  const response = await fetch(endpoint, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded',
-      'Authorization': `Bearer ${FREEMIUS_API_TOKEN}`,
-    },
-    body,
-  })
-
-  const payload = await response.json().catch(() => ({}))
-  console.log('Freemius response:', JSON.stringify(payload))
-
-  if (!response.ok && !payload.license) {
-    throw new Error(payload.error?.message || payload.message || `Freemius returned ${response.status}`)
-  }
-  return payload
-}
-
-function normalizeFreemius(payload, licenseKey) {
-  const license = payload.license || payload
-  const isActive = license.is_active === true || license.activated > 0 || payload.install_id > 0
-  const isExpired = license.expiration && license.expiration !== 'lifetime' && new Date(license.expiration).getTime() < Date.now()
-
-  return {
-    valid: Boolean(isActive && !isExpired),
-    licenseKey: mask(licenseKey),
-    plan: license.plan_name || 'Premium',
-    customerEmail: license.customer_email || payload.user_email || '',
-    expiresAt: license.expiration || null,
-    source: 'freemius-render-proxy',
-  }
-}
-
 app.get('/health', (_req, res) => {
   res.json({ ok: true, service: 'tweakshift-license-server' })
 })
@@ -78,15 +38,31 @@ app.post('/api/license/verify', async (req, res) => {
     const email = clean(req.body.email)
     if (!licenseKey) return res.status(400).json({ valid: false, error: 'License key is required.' })
 
-    if (process.env.NODE_ENV !== 'production' && licenseKey === 'TS-DEMO-UNLOCK') {
-      return res.json({ valid: true, active: true, plan: 'Premium Dev', customerEmail: email, source: 'local-dev' })
-    }
+    const payload = await fs.api.post(
+      `/products/${FREEMIUS_PRODUCT_ID}/licenses/activations.json`,
+      { license_key: licenseKey, plugin_id: FREEMIUS_PRODUCT_ID }
+    )
 
-    const payload = await verifyWithFreemius({ licenseKey })
-    const normalized = normalizeFreemius(payload, licenseKey)
-    if (!normalized.valid) return res.status(403).json({ ...normalized, error: 'License is inactive, expired, or not valid.' })
-    return res.json({ ...normalized, active: true })
+    console.log('Freemius response:', JSON.stringify(payload))
+
+    const license = payload.license || payload
+    const isActive = license.is_active === true || license.activated > 0 || payload.install_id > 0
+    const isExpired = license.expiration && license.expiration !== 'lifetime' && new Date(license.expiration).getTime() < Date.now()
+    const valid = Boolean(isActive && !isExpired)
+
+    if (!valid) return res.status(403).json({ valid: false, error: 'License is inactive, expired, or not valid.' })
+
+    return res.json({
+      valid: true,
+      active: true,
+      licenseKey: mask(licenseKey),
+      plan: license.plan_name || 'Premium',
+      customerEmail: license.customer_email || email || '',
+      expiresAt: license.expiration || null,
+      source: 'freemius-sdk',
+    })
   } catch (err) {
+    console.error('License error:', err)
     return res.status(500).json({ valid: false, error: err.message })
   }
 })
