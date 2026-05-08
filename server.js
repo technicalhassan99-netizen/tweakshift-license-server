@@ -34,7 +34,7 @@ async function verifyWithFreemius({ licenseKey }) {
     plugin_id: 29310,
   }).toString()
 
-  const timestamp = Math.floor(Date.now() / 1000)
+  const timestamp = new Date().toUTCString()
   const stringToSign = `${timestamp}POST/v1/products/${FREEMIUS_PRODUCT_ID}/licenses/activations.json`
   const signature = crypto.createHmac('sha256', FREEMIUS_SECRET_KEY).update(stringToSign).digest('base64')
   const authHeader = `FS ${FREEMIUS_PRODUCT_ID}:${FREEMIUS_PUBLIC_KEY}:${timestamp}:${signature}`
