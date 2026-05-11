@@ -10,10 +10,11 @@ app.use(cors())
 app.use(express.json())
 
 // GUMROAD_PRODUCT_ID = "Vc5fvNvynz6O4N_PzVShSA==" (the actual product_id, NOT permalink)
-const GUMROAD_PRODUCT_ID  = process.env.GUMROAD_PRODUCT_ID
-const MAX_DEVICES          = parseInt(process.env.MAX_DEVICES_PER_LICENSE) || 2
-const PORT                 = parseInt(process.env.PORT) || 3001
-const ACTIVATIONS_FILE     = path.join(__dirname, 'activations.json')
+const GUMROAD_PRODUCT_ID = process.env.GUMROAD_PRODUCT_ID
+const PAYHIP_PRODUCT_SECRET_KEY = process.env.PAYHIP_PRODUCT_SECRET_KEY
+const MAX_DEVICES = parseInt(process.env.MAX_DEVICES_PER_LICENSE) || 2
+const PORT = parseInt(process.env.PORT) || 3001
+const ACTIVATIONS_FILE = path.join(__dirname, 'activations.json')
 
 let inMemoryActivations = {}
 
@@ -38,23 +39,72 @@ function saveActivations(data) {
 
 loadActivations()
 
-app.post('/api/verify-license', async (req, res) => {
-  const { licenseKey, deviceId } = req.body
-
-  if (!licenseKey || !deviceId) {
-    return res.status(400).json({ success: false, message: 'License key and device ID are required.' })
+async function verifyPayhipLicense(cleanKey) {
+  if (!PAYHIP_PRODUCT_SECRET_KEY) {
+    console.warn('PAYHIP_PRODUCT_SECRET_KEY not set. Skipping Payhip verification.')
+    return { valid: false, skipped: true, message: 'PAYHIP_PRODUCT_SECRET_KEY not set.' }
   }
-
-  if (!GUMROAD_PRODUCT_ID) {
-    return res.status(500).json({ success: false, message: 'Server config error: GUMROAD_PRODUCT_ID not set.' })
-  }
-
-  const cleanKey = licenseKey.trim().toUpperCase()
-  let gumroadValid = false
-  let licenseData = null
 
   try {
-    // Use product_id (not product_permalink) — required for this product
+    console.log('Verifying with Payhip | key:', cleanKey.slice(0, 8) + '...')
+
+    const response = await axios.get(
+      'https://payhip.com/api/v2/license/verify',
+      {
+        params: {
+          license_key: cleanKey
+        },
+        headers: {
+          'product-secret-key': PAYHIP_PRODUCT_SECRET_KEY
+        },
+        timeout: 10000
+      }
+    )
+
+    console.log('Payhip response:', response.status, JSON.stringify(response.data))
+
+    const licenseData = response.data?.data
+
+    if (licenseData && licenseData.enabled === true) {
+      return {
+        valid: true,
+        provider: 'payhip',
+        data: licenseData,
+        email: licenseData.buyer_email || null
+      }
+    }
+
+    return {
+      valid: false,
+      provider: 'payhip',
+      message: 'Invalid or disabled Payhip license.'
+    }
+  } catch (err) {
+    if (err.response) {
+      console.log('Payhip HTTP error:', err.response.status, JSON.stringify(err.response.data))
+      return {
+        valid: false,
+        provider: 'payhip',
+        message: 'Payhip license rejected.'
+      }
+    }
+
+    console.error('Payhip network error:', err.message)
+    return {
+      valid: false,
+      provider: 'payhip',
+      message: 'Could not reach Payhip.'
+    }
+  }
+}
+
+async function verifyGumroadLicense(cleanKey) {
+  if (!GUMROAD_PRODUCT_ID) {
+    console.warn('GUMROAD_PRODUCT_ID not set. Skipping Gumroad verification.')
+    return { valid: false, skipped: true, message: 'GUMROAD_PRODUCT_ID not set.' }
+  }
+
+  try {
     const params = new URLSearchParams({
       product_id: GUMROAD_PRODUCT_ID,
       license_key: cleanKey,
@@ -70,68 +120,199 @@ app.post('/api/verify-license', async (req, res) => {
     )
 
     console.log('Gumroad response:', response.status, JSON.stringify(response.data))
-    licenseData = response.data
-    if (response.data.success === true) gumroadValid = true
 
+    if (response.data?.success === true) {
+      return {
+        valid: true,
+        provider: 'gumroad',
+        data: response.data,
+        email: response.data?.purchase?.email || null
+      }
+    }
+
+    return {
+      valid: false,
+      provider: 'gumroad',
+      message: response.data?.message || 'Invalid Gumroad license.'
+    }
   } catch (err) {
     if (err.response) {
       console.log('Gumroad HTTP error:', err.response.status, JSON.stringify(err.response.data))
-      if (err.response.status === 404) {
-        return res.json({ success: false, message: 'Invalid license key. Please check and try again.' })
+
+      return {
+        valid: false,
+        provider: 'gumroad',
+        message: err.response.data?.message || 'Invalid Gumroad license.'
       }
-      licenseData = err.response.data
-    } else {
-      console.error('Network error:', err.message)
-      return res.status(502).json({ success: false, message: 'Could not reach Gumroad. Try again in a moment.' })
+    }
+
+    console.error('Gumroad network error:', err.message)
+
+    return {
+      valid: false,
+      provider: 'gumroad',
+      networkError: true,
+      message: 'Could not reach Gumroad.'
+    }
+  }
+}
+
+function checkAndSaveDeviceActivation(cleanKey, deviceId, provider, email) {
+  const activationKey = `${provider}:${cleanKey}`
+
+  const activations = loadActivations()
+  const record = activations[activationKey] || {
+    provider,
+    email: email || null,
+    devices: []
+  }
+
+  if (record.devices.includes(deviceId)) {
+    record.lastSeen = new Date().toISOString()
+    record.email = email || record.email || null
+    activations[activationKey] = record
+    saveActivations(activations)
+
+    return {
+      allowed: true,
+      reactivation: true,
+      deviceCount: record.devices.length
     }
   }
 
-  if (!gumroadValid) {
-    const msg = licenseData?.message || 'Invalid license key.'
-    console.warn('License rejected:', cleanKey.slice(0, 8), '|', msg)
-    return res.json({ success: false, message: msg })
-  }
-
-  // Device limit check
-  const activations = loadActivations()
-  const record = activations[cleanKey] || { devices: [] }
-
-  if (record.devices.includes(deviceId)) {
-    console.log('Re-activation OK:', cleanKey.slice(0, 8))
-    return res.json({ success: true, plan: 'premium', premiumUnlocked: true })
-  }
-
   if (record.devices.length >= MAX_DEVICES) {
-    return res.json({
-      success: false,
+    return {
+      allowed: false,
       message: `License already used on ${MAX_DEVICES} device(s). Contact support to reset.`
-    })
+    }
   }
 
   record.devices.push(deviceId)
+  record.provider = provider
+  record.email = email || record.email || null
   record.activatedAt = record.activatedAt || new Date().toISOString()
   record.lastSeen = new Date().toISOString()
-  activations[cleanKey] = record
+
+  activations[activationKey] = record
   saveActivations(activations)
 
-  console.log('New activation:', cleanKey.slice(0, 8), '| Total devices:', record.devices.length)
-  return res.json({ success: true, plan: 'premium', premiumUnlocked: true })
+  return {
+    allowed: true,
+    reactivation: false,
+    deviceCount: record.devices.length
+  }
+}
+
+app.post('/api/verify-license', async (req, res) => {
+  const { licenseKey, deviceId } = req.body
+
+  if (!licenseKey || !deviceId) {
+    return res.status(400).json({
+      success: false,
+      message: 'License key and device ID are required.'
+    })
+  }
+
+  const cleanKey = licenseKey.trim().toUpperCase()
+
+  // 1. New Payhip users check first
+  const payhipResult = await verifyPayhipLicense(cleanKey)
+
+  if (payhipResult.valid) {
+    const deviceCheck = checkAndSaveDeviceActivation(
+      cleanKey,
+      deviceId,
+      'payhip',
+      payhipResult.email
+    )
+
+    if (!deviceCheck.allowed) {
+      return res.json({
+        success: false,
+        message: deviceCheck.message
+      })
+    }
+
+    console.log(
+      deviceCheck.reactivation ? 'Payhip re-activation OK:' : 'Payhip new activation:',
+      cleanKey.slice(0, 8),
+      '| Total devices:',
+      deviceCheck.deviceCount
+    )
+
+    return res.json({
+      success: true,
+      provider: 'payhip',
+      plan: 'premium',
+      premiumUnlocked: true,
+      message: 'Payhip license verified successfully.'
+    })
+  }
+
+  // 2. Old Gumroad users fallback
+  const gumroadResult = await verifyGumroadLicense(cleanKey)
+
+  if (gumroadResult.valid) {
+    const deviceCheck = checkAndSaveDeviceActivation(
+      cleanKey,
+      deviceId,
+      'gumroad',
+      gumroadResult.email
+    )
+
+    if (!deviceCheck.allowed) {
+      return res.json({
+        success: false,
+        message: deviceCheck.message
+      })
+    }
+
+    console.log(
+      deviceCheck.reactivation ? 'Gumroad re-activation OK:' : 'Gumroad new activation:',
+      cleanKey.slice(0, 8),
+      '| Total devices:',
+      deviceCheck.deviceCount
+    )
+
+    return res.json({
+      success: true,
+      provider: 'gumroad',
+      plan: 'premium',
+      premiumUnlocked: true,
+      message: 'Gumroad license verified successfully.'
+    })
+  }
+
+  console.warn('License rejected:', cleanKey.slice(0, 8))
+
+  return res.json({
+    success: false,
+    message: gumroadResult.message || payhipResult.message || 'Invalid license key. Please check and try again.'
+  })
 })
 
 app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
-    product_id: GUMROAD_PRODUCT_ID || 'NOT SET',
+    gumroad_product_id: GUMROAD_PRODUCT_ID ? 'SET' : 'NOT SET',
+    payhip_product_secret_key: PAYHIP_PRODUCT_SECRET_KEY ? 'SET' : 'NOT SET',
+    max_devices: MAX_DEVICES,
     activations: Object.keys(inMemoryActivations).length,
     timestamp: new Date().toISOString()
   })
 })
 
 app.get('/', (req, res) => {
-  res.json({ name: 'TweakShift License Server', status: 'running' })
+  res.json({
+    name: 'TweakShift License Server',
+    status: 'running',
+    payhip: PAYHIP_PRODUCT_SECRET_KEY ? 'enabled' : 'not configured',
+    gumroad: GUMROAD_PRODUCT_ID ? 'enabled' : 'not configured'
+  })
 })
 
 app.listen(PORT, () => {
   console.log(`TweakShift License Server on port ${PORT}`)
-  console.log(`Product ID: ${GUMROAD_PRODUCT_ID || 'NOT SET'}`)
+  console.log(`Gumroad Product ID: ${GUMROAD_PRODUCT_ID ? 'SET' : 'NOT SET'}`)
+  console.log(`Payhip Secret Key: ${PAYHIP_PRODUCT_SECRET_KEY ? 'SET' : 'NOT SET'}`)
 })
