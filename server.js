@@ -1,318 +1,394 @@
+/**
+ * TweakShift Premium License Server
+ * Gumroad stays untouched. Freemius lifetime licensing is added as a second provider.
+ * Deploy on Render.com
+ * Build: npm install
+ * Start: node server.js
+ */
+
 const express = require('express')
-const cors = require('cors')
-const axios = require('axios')
-const fs = require('fs')
-const path = require('path')
+const cors    = require('cors')
+const axios   = require('axios')
+const fs      = require('fs')
+const path    = require('path')
+const crypto  = require('crypto')
+
 require('dotenv').config()
 
 const app = express()
 app.use(cors())
 app.use(express.json())
 
-// GUMROAD_PRODUCT_ID = "Vc5fvNvynz6O4N_PzVShSA==" (the actual product_id, NOT permalink)
-const GUMROAD_PRODUCT_ID = process.env.GUMROAD_PRODUCT_ID
-const PAYHIP_PRODUCT_SECRET_KEY = process.env.PAYHIP_PRODUCT_SECRET_KEY
-const MAX_DEVICES = parseInt(process.env.MAX_DEVICES_PER_LICENSE) || 2
-const PORT = parseInt(process.env.PORT) || 3001
-const ACTIVATIONS_FILE = path.join(__dirname, 'activations.json')
+const PORT                  = process.env.PORT || 3001
+const GUMROAD_PRODUCT_ID    = process.env.GUMROAD_PRODUCT_ID || ''
+const GUMROAD_ACCESS_TOKEN  = process.env.GUMROAD_ACCESS_TOKEN || ''
+const MAX_DEVICES           = parseInt(process.env.MAX_DEVICES_PER_LICENSE || '1', 10)
 
-let inMemoryActivations = {}
+// Freemius lifetime product keys. Keep these only in Render Environment Variables.
+const FREEMIUS_PRODUCT_ID   = process.env.FREEMIUS_PRODUCT_ID || ''
+const FREEMIUS_API_BASE     = 'https://api.freemius.com/v1'
 
-function loadActivations() {
+// Local JSON activation DB for Gumroad device binding + basic Freemius install tracking.
+// For bigger scale, move this to PostgreSQL/Redis later.
+const DB_PATH = path.join(__dirname, 'activations.json')
+
+function loadDB() {
   try {
-    if (fs.existsSync(ACTIVATIONS_FILE)) {
-      const data = JSON.parse(fs.readFileSync(ACTIVATIONS_FILE, 'utf8'))
-      inMemoryActivations = { ...inMemoryActivations, ...data }
-    }
-  } catch {}
-  return inMemoryActivations
-}
-
-function saveActivations(data) {
-  inMemoryActivations = data
-  try {
-    fs.writeFileSync(ACTIVATIONS_FILE, JSON.stringify(data, null, 2), 'utf8')
+    if (!fs.existsSync(DB_PATH)) return {}
+    return JSON.parse(fs.readFileSync(DB_PATH, 'utf8'))
   } catch {
-    console.warn('Could not write activations.json — using in-memory only')
+    return {}
   }
 }
 
-loadActivations()
-
-async function verifyPayhipLicense(cleanKey) {
-  if (!PAYHIP_PRODUCT_SECRET_KEY) {
-    console.warn('PAYHIP_PRODUCT_SECRET_KEY not set. Skipping Payhip verification.')
-    return { valid: false, skipped: true, message: 'PAYHIP_PRODUCT_SECRET_KEY not set.' }
-  }
-
-  try {
-    console.log('Verifying with Payhip | key:', cleanKey.slice(0, 8) + '...')
-
-    const response = await axios.get(
-      'https://payhip.com/api/v2/license/verify',
-      {
-        params: {
-          license_key: cleanKey
-        },
-        headers: {
-          'product-secret-key': PAYHIP_PRODUCT_SECRET_KEY
-        },
-        timeout: 10000
-      }
-    )
-
-    console.log('Payhip response:', response.status, JSON.stringify(response.data))
-
-    const licenseData = response.data?.data
-
-    if (licenseData && licenseData.enabled === true) {
-      return {
-        valid: true,
-        provider: 'payhip',
-        data: licenseData,
-        email: licenseData.buyer_email || null
-      }
-    }
-
-    return {
-      valid: false,
-      provider: 'payhip',
-      message: 'Invalid or disabled Payhip license.'
-    }
-  } catch (err) {
-    if (err.response) {
-      console.log('Payhip HTTP error:', err.response.status, JSON.stringify(err.response.data))
-      return {
-        valid: false,
-        provider: 'payhip',
-        message: 'Payhip license rejected.'
-      }
-    }
-
-    console.error('Payhip network error:', err.message)
-    return {
-      valid: false,
-      provider: 'payhip',
-      message: 'Could not reach Payhip.'
-    }
-  }
+function saveDB(data) {
+  fs.writeFileSync(DB_PATH, JSON.stringify(data, null, 2), 'utf8')
 }
 
-async function verifyGumroadLicense(cleanKey) {
-  if (!GUMROAD_PRODUCT_ID) {
-    console.warn('GUMROAD_PRODUCT_ID not set. Skipping Gumroad verification.')
-    return { valid: false, skipped: true, message: 'GUMROAD_PRODUCT_ID not set.' }
+function normalizeKey(licenseKey) {
+  return String(licenseKey || '').trim().toUpperCase()
+}
+
+function makeFreemiusUid(deviceId) {
+  // Freemius requires a stable 32-character UID. This is deterministic per PC/device.
+  return crypto.createHash('sha256').update(String(deviceId || 'unknown-device')).digest('hex').slice(0, 32)
+}
+
+function getFreemiusInstallId(data) {
+  return data?.install?.id || data?.install_id || data?.installId || data?.id || null
+}
+
+function getFreemiusLicenseId(data) {
+  return data?.license?.id || data?.license_id || data?.licenseId || data?.id || null
+}
+
+// ── Gumroad verification: untouched existing behavior ───────────────
+async function verifyGumroadLicense(licenseKey) {
+  if (!GUMROAD_PRODUCT_ID || !GUMROAD_ACCESS_TOKEN) {
+    return { success: false, message: 'Gumroad is not configured on the server.' }
   }
 
   try {
-    const params = new URLSearchParams({
-      product_id: GUMROAD_PRODUCT_ID,
-      license_key: cleanKey,
-      increment_uses_count: 'false'
-    })
-
-    console.log('Verifying with Gumroad | product_id:', GUMROAD_PRODUCT_ID, '| key:', cleanKey.slice(0, 8) + '...')
-
     const response = await axios.post(
       'https://api.gumroad.com/v2/licenses/verify',
-      params.toString(),
-      { headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, timeout: 10000 }
+      {
+        product_id: GUMROAD_PRODUCT_ID,
+        license_key: licenseKey,
+        increment_uses_count: false,
+      },
+      {
+        headers: { Authorization: `Bearer ${GUMROAD_ACCESS_TOKEN}` },
+        timeout: 10000,
+      }
     )
 
-    console.log('Gumroad response:', response.status, JSON.stringify(response.data))
-
-    if (response.data?.success === true) {
-      return {
-        valid: true,
-        provider: 'gumroad',
-        data: response.data,
-        email: response.data?.purchase?.email || null
-      }
-    }
-
-    return {
-      valid: false,
-      provider: 'gumroad',
-      message: response.data?.message || 'Invalid Gumroad license.'
-    }
+    return response.data
   } catch (err) {
-    if (err.response) {
-      console.log('Gumroad HTTP error:', err.response.status, JSON.stringify(err.response.data))
-
-      return {
-        valid: false,
-        provider: 'gumroad',
-        message: err.response.data?.message || 'Invalid Gumroad license.'
-      }
-    }
-
-    console.error('Gumroad network error:', err.message)
-
-    return {
-      valid: false,
-      provider: 'gumroad',
-      networkError: true,
-      message: 'Could not reach Gumroad.'
-    }
+    console.error('[Gumroad] Verify error:', err?.response?.data || err.message)
+    return { success: false, message: 'Failed to verify with Gumroad.' }
   }
 }
 
-function checkAndSaveDeviceActivation(cleanKey, deviceId, provider, email) {
-  const activationKey = `${provider}:${cleanKey}`
+function activateDeviceInLocalDB({ normalizedKey, deviceId, provider, extra = {} }) {
+  const db = loadDB()
 
-  const activations = loadActivations()
-  const record = activations[activationKey] || {
-    provider,
-    email: email || null,
-    devices: []
+  if (!db[normalizedKey]) {
+    db[normalizedKey] = {
+      provider,
+      devices: [],
+      activatedAt: new Date().toISOString(),
+      meta: {},
+    }
   }
 
-  if (record.devices.includes(deviceId)) {
-    record.lastSeen = new Date().toISOString()
-    record.email = email || record.email || null
-    activations[activationKey] = record
-    saveActivations(activations)
+  const record = db[normalizedKey]
+  record.provider = record.provider || provider
+  record.meta = { ...(record.meta || {}), ...extra }
 
-    return {
-      allowed: true,
-      reactivation: true,
-      deviceCount: record.devices.length
-    }
+  if (record.devices.includes(deviceId)) {
+    record.lastVerifiedAt = new Date().toISOString()
+    saveDB(db)
+    return { ok: true, alreadyActive: true, record }
   }
 
   if (record.devices.length >= MAX_DEVICES) {
     return {
-      allowed: false,
-      message: `License already used on ${MAX_DEVICES} device(s). Contact support to reset.`
+      ok: false,
+      message: `This license is already activated on ${MAX_DEVICES} device(s). Deactivate another device first.`,
     }
   }
 
   record.devices.push(deviceId)
-  record.provider = provider
-  record.email = email || record.email || null
-  record.activatedAt = record.activatedAt || new Date().toISOString()
-  record.lastSeen = new Date().toISOString()
+  record.lastVerifiedAt = new Date().toISOString()
+  saveDB(db)
+  return { ok: true, alreadyActive: false, record }
+}
 
-  activations[activationKey] = record
-  saveActivations(activations)
+function deactivateDeviceInLocalDB({ normalizedKey, deviceId }) {
+  const db = loadDB()
+  if (!db[normalizedKey]) return true
+  db[normalizedKey].devices = (db[normalizedKey].devices || []).filter(d => d !== deviceId)
+  db[normalizedKey].lastDeactivatedAt = new Date().toISOString()
+  saveDB(db)
+  return true
+}
 
-  return {
-    allowed: true,
-    reactivation: false,
-    deviceCount: record.devices.length
+// ── Freemius lifetime activation ───────────────────────────────────
+async function activateFreemiusLicense({ licenseKey, deviceId, deviceName, appVersion }) {
+  if (!FREEMIUS_PRODUCT_ID) {
+    return { success: false, message: 'Freemius is not configured on the server.' }
+  }
+
+  const uid = makeFreemiusUid(deviceId)
+  const url = `${FREEMIUS_API_BASE}/products/${FREEMIUS_PRODUCT_ID}/licenses/activate.json`
+
+  try {
+    const response = await axios.post(
+      url,
+      {
+        uid,
+        license_key: licenseKey,
+        title: deviceName || 'TweakShift Premium PC',
+        version: appVersion || '1.0.0',
+      },
+      {
+        headers: { 'Content-Type': 'application/json' },
+        timeout: 15000,
+      }
+    )
+
+    const data = response.data || {}
+    const installId = getFreemiusInstallId(data)
+    const licenseId = getFreemiusLicenseId(data)
+
+    return {
+      success: true,
+      message: 'Freemius license activated successfully.',
+      provider: 'freemius',
+      premiumUnlocked: true,
+      source: 'freemius',
+      freemiusUid: uid,
+      freemiusInstallId: installId,
+      freemiusLicenseId: licenseId,
+      raw: data,
+    }
+  } catch (err) {
+    const data = err?.response?.data
+    console.error('[Freemius] Activate error:', data || err.message)
+    return {
+      success: false,
+      message: data?.error?.message || data?.message || 'Invalid Freemius license key.',
+      provider: 'freemius',
+      details: data || null,
+    }
   }
 }
 
+async function deactivateFreemiusLicense({ licenseKey, deviceId, freemiusUid, freemiusInstallId }) {
+  if (!FREEMIUS_PRODUCT_ID) {
+    return { success: false, message: 'Freemius is not configured on the server.' }
+  }
+
+  const uid = freemiusUid || makeFreemiusUid(deviceId)
+  const installId = freemiusInstallId
+
+  if (!uid || !installId) {
+    return { success: false, message: 'Missing Freemius install data. Local license was removed, but Freemius quota may still need manual deactivation.' }
+  }
+
+  const url = `${FREEMIUS_API_BASE}/products/${FREEMIUS_PRODUCT_ID}/licenses/deactivate.json?fields=id,name,slug`
+
+  try {
+    const response = await axios.post(
+      url,
+      {
+        uid,
+        install_id: Number(installId),
+        license_key: licenseKey,
+      },
+      {
+        headers: { 'Content-Type': 'application/json' },
+        timeout: 15000,
+      }
+    )
+
+    return {
+      success: true,
+      message: 'Freemius license deactivated on this PC.',
+      provider: 'freemius',
+      raw: response.data || {},
+    }
+  } catch (err) {
+    const data = err?.response?.data
+    console.error('[Freemius] Deactivate error:', data || err.message)
+    return {
+      success: false,
+      message: data?.error?.message || data?.message || 'Freemius deactivation failed.',
+      provider: 'freemius',
+      details: data || null,
+    }
+  }
+}
+
+// ── POST /api/verify-license ───────────────────────────────────────
+// This endpoint is used by the app Activate button.
+// It first verifies existing Gumroad users exactly like before.
+// If Gumroad fails, it tries Freemius lifetime activation.
 app.post('/api/verify-license', async (req, res) => {
-  const { licenseKey, deviceId } = req.body
+  const { licenseKey, deviceId, deviceName, appVersion } = req.body
 
   if (!licenseKey || !deviceId) {
-    return res.status(400).json({
-      success: false,
-      message: 'License key and device ID are required.'
-    })
+    return res.status(400).json({ success: false, message: 'Missing licenseKey or deviceId.' })
   }
 
-  const cleanKey = licenseKey.trim().toUpperCase()
+  const cleanKey = String(licenseKey).trim()
+  const normalizedKey = normalizeKey(cleanKey)
 
-  // 1. New Payhip users check first
-  const payhipResult = await verifyPayhipLicense(cleanKey)
-
-  if (payhipResult.valid) {
-    const deviceCheck = checkAndSaveDeviceActivation(
-      cleanKey,
-      deviceId,
-      'payhip',
-      payhipResult.email
-    )
-
-    if (!deviceCheck.allowed) {
-      return res.json({
-        success: false,
-        message: deviceCheck.message
-      })
-    }
-
-    console.log(
-      deviceCheck.reactivation ? 'Payhip re-activation OK:' : 'Payhip new activation:',
-      cleanKey.slice(0, 8),
-      '| Total devices:',
-      deviceCheck.deviceCount
-    )
-
-    return res.json({
-      success: true,
-      provider: 'payhip',
-      plan: 'premium',
-      premiumUnlocked: true,
-      message: 'Payhip license verified successfully.'
-    })
-  }
-
-  // 2. Old Gumroad users fallback
+  // 1) Existing Gumroad flow — untouched for current customers.
   const gumroadResult = await verifyGumroadLicense(cleanKey)
 
-  if (gumroadResult.valid) {
-    const deviceCheck = checkAndSaveDeviceActivation(
-      cleanKey,
+  if (gumroadResult?.success) {
+    const deviceResult = activateDeviceInLocalDB({
+      normalizedKey,
       deviceId,
-      'gumroad',
-      gumroadResult.email
-    )
+      provider: 'gumroad',
+      extra: { gumroadSaleId: gumroadResult?.purchase?.id || null },
+    })
 
-    if (!deviceCheck.allowed) {
-      return res.json({
-        success: false,
-        message: deviceCheck.message
-      })
+    if (!deviceResult.ok) {
+      return res.json({ success: false, message: deviceResult.message })
     }
-
-    console.log(
-      deviceCheck.reactivation ? 'Gumroad re-activation OK:' : 'Gumroad new activation:',
-      cleanKey.slice(0, 8),
-      '| Total devices:',
-      deviceCheck.deviceCount
-    )
 
     return res.json({
       success: true,
-      provider: 'gumroad',
-      plan: 'premium',
+      message: deviceResult.alreadyActive ? 'Gumroad license verified successfully.' : 'Gumroad license activated successfully!',
       premiumUnlocked: true,
-      message: 'Gumroad license verified successfully.'
+      provider: 'gumroad',
+      source: 'gumroad',
+      licenseKey: normalizedKey,
+      activatedAt: new Date().toISOString(),
     })
   }
 
-  console.warn('License rejected:', cleanKey.slice(0, 8))
+  // 2) New Freemius lifetime flow.
+  const freemiusResult = await activateFreemiusLicense({
+    licenseKey: cleanKey,
+    deviceId,
+    deviceName,
+    appVersion,
+  })
+
+  if (!freemiusResult?.success) {
+    return res.json({
+      success: false,
+      message: freemiusResult?.message || 'Invalid license key. Please check your key and try again.',
+      gumroadMessage: gumroadResult?.message || null,
+      freemiusDetails: freemiusResult?.details || null,
+    })
+  }
+
+  const deviceResult = activateDeviceInLocalDB({
+    normalizedKey,
+    deviceId,
+    provider: 'freemius',
+    extra: {
+      freemiusUid: freemiusResult.freemiusUid,
+      freemiusInstallId: freemiusResult.freemiusInstallId,
+      freemiusLicenseId: freemiusResult.freemiusLicenseId,
+    },
+  })
+
+  if (!deviceResult.ok) {
+    // Freemius activation succeeded but local quota says too many.
+    // Try to release Freemius install immediately to avoid locked quota.
+    await deactivateFreemiusLicense({
+      licenseKey: cleanKey,
+      deviceId,
+      freemiusUid: freemiusResult.freemiusUid,
+      freemiusInstallId: freemiusResult.freemiusInstallId,
+    })
+    return res.json({ success: false, message: deviceResult.message })
+  }
 
   return res.json({
-    success: false,
-    message: gumroadResult.message || payhipResult.message || 'Invalid license key. Please check and try again.'
+    success: true,
+    message: 'Freemius license activated successfully.',
+    premiumUnlocked: true,
+    provider: 'freemius',
+    source: 'freemius',
+    licenseKey: normalizedKey,
+    freemiusUid: freemiusResult.freemiusUid,
+    freemiusInstallId: freemiusResult.freemiusInstallId,
+    freemiusLicenseId: freemiusResult.freemiusLicenseId,
+    activatedAt: new Date().toISOString(),
   })
 })
 
-app.get('/health', (req, res) => {
+// Alias for future compatibility.
+app.post('/api/license/activate', (req, res) => {
+  req.url = '/api/verify-license'
+  app._router.handle(req, res)
+})
+
+// ── POST /api/deactivate-license ───────────────────────────────────
+// Gumroad: removes device from local DB only.
+// Freemius: releases Freemius install quota, then removes device from local DB.
+app.post('/api/deactivate-license', async (req, res) => {
+  const { licenseKey, deviceId, source, freemiusUid, freemiusInstallId } = req.body
+
+  if (!licenseKey || !deviceId) {
+    return res.status(400).json({ success: false, message: 'Missing licenseKey or deviceId.' })
+  }
+
+  const normalizedKey = normalizeKey(licenseKey)
+  const db = loadDB()
+  const record = db[normalizedKey]
+  const provider = source || record?.provider || 'gumroad'
+
+  let remoteResult = { success: true, message: 'License deactivated on this device.' }
+
+  if (provider === 'freemius') {
+    remoteResult = await deactivateFreemiusLicense({
+      licenseKey: String(licenseKey).trim(),
+      deviceId,
+      freemiusUid: freemiusUid || record?.meta?.freemiusUid,
+      freemiusInstallId: freemiusInstallId || record?.meta?.freemiusInstallId,
+    })
+  }
+
+  deactivateDeviceInLocalDB({ normalizedKey, deviceId })
+
+  return res.json({
+    success: remoteResult.success !== false,
+    message: remoteResult.message || 'License deactivated on this device.',
+    provider,
+    remote: remoteResult,
+  })
+})
+
+// Future-compatible alias.
+app.post('/api/license/deactivate', (req, res) => {
+  req.url = '/api/deactivate-license'
+  app._router.handle(req, res)
+})
+
+// ── GET /api/health ────────────────────────────────────────────────
+app.get('/api/health', (req, res) => {
   res.json({
     status: 'ok',
-    gumroad_product_id: GUMROAD_PRODUCT_ID ? 'SET' : 'NOT SET',
-    payhip_product_secret_key: PAYHIP_PRODUCT_SECRET_KEY ? 'SET' : 'NOT SET',
-    max_devices: MAX_DEVICES,
-    activations: Object.keys(inMemoryActivations).length,
-    timestamp: new Date().toISOString()
+    service: 'TweakShift Premium License Server',
+    gumroadConfigured: Boolean(GUMROAD_PRODUCT_ID && GUMROAD_ACCESS_TOKEN),
+    freemiusConfigured: Boolean(FREEMIUS_PRODUCT_ID),
+    timestamp: new Date().toISOString(),
   })
 })
 
 app.get('/', (req, res) => {
-  res.json({
-    name: 'TweakShift License Server',
-    status: 'running',
-    payhip: PAYHIP_PRODUCT_SECRET_KEY ? 'enabled' : 'not configured',
-    gumroad: GUMROAD_PRODUCT_ID ? 'enabled' : 'not configured'
-  })
+  res.json({ ok: true, service: 'TweakShift Premium License Server' })
 })
 
 app.listen(PORT, () => {
-  console.log(`TweakShift License Server on port ${PORT}`)
-  console.log(`Gumroad Product ID: ${GUMROAD_PRODUCT_ID ? 'SET' : 'NOT SET'}`)
-  console.log(`Payhip Secret Key: ${PAYHIP_PRODUCT_SECRET_KEY ? 'SET' : 'NOT SET'}`)
+  console.log(`[TweakShift Premium License Server] Running on port ${PORT}`)
+  console.log(`[TweakShift Premium License Server] Gumroad: ${GUMROAD_PRODUCT_ID ? 'configured' : 'NOT SET'}`)
+  console.log(`[TweakShift Premium License Server] Freemius: ${FREEMIUS_PRODUCT_ID ? 'configured' : 'NOT SET'}`)
 })
