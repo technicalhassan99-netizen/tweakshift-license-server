@@ -1,5 +1,5 @@
 /**
- * TweakShift Premium License Server
+ * TweakShift Classic License Server
  * Gumroad stays untouched. Freemius lifetime licensing is added as a second provider.
  * Deploy on Render.com
  * Build: npm install
@@ -55,11 +55,15 @@ function makeFreemiusUid(deviceId) {
 }
 
 function getFreemiusInstallId(data) {
-  return data?.install?.id || data?.install_id || data?.installId || data?.id || null
+  return data?.install?.id || data?.install?.install_id || data?.install_id || data?.installId || data?.id || null
+}
+
+function getFreemiusInstallApiToken(data) {
+  return data?.install_api_token || data?.installApiToken || data?.install?.api_token || data?.install?.install_api_token || data?.install?.secret_key || null
 }
 
 function getFreemiusLicenseId(data) {
-  return data?.license?.id || data?.license_id || data?.licenseId || data?.id || null
+  return data?.license?.id || data?.license_id || data?.licenseId || null
 }
 
 // ── Gumroad verification: untouched existing behavior ───────────────
@@ -148,7 +152,7 @@ async function activateFreemiusLicense({ licenseKey, deviceId, deviceName, appVe
       {
         uid,
         license_key: licenseKey,
-        title: deviceName || 'TweakShift Premium PC',
+        title: deviceName || 'TweakShift Classic PC',
         version: appVersion || '1.0.0',
       },
       {
@@ -159,6 +163,7 @@ async function activateFreemiusLicense({ licenseKey, deviceId, deviceName, appVe
 
     const data = response.data || {}
     const installId = getFreemiusInstallId(data)
+    const installApiToken = getFreemiusInstallApiToken(data)
     const licenseId = getFreemiusLicenseId(data)
 
     return {
@@ -169,6 +174,7 @@ async function activateFreemiusLicense({ licenseKey, deviceId, deviceName, appVe
       source: 'freemius',
       freemiusUid: uid,
       freemiusInstallId: installId,
+      freemiusInstallApiToken: installApiToken,
       freemiusLicenseId: licenseId,
       raw: data,
     }
@@ -193,7 +199,7 @@ async function deactivateFreemiusLicense({ licenseKey, deviceId, freemiusUid, fr
   const installId = freemiusInstallId
 
   if (!uid || !installId) {
-    return { success: false, message: 'Missing Freemius install data. Local license was removed, but Freemius quota may still need manual deactivation.' }
+    return { success: false, message: 'Missing Freemius install data. License was not deactivated remotely, so keep it active on this PC and try again after re-activating with the latest app build.' }
   }
 
   const url = `${FREEMIUS_API_BASE}/products/${FREEMIUS_PRODUCT_ID}/licenses/deactivate.json?fields=id,name,slug`
@@ -294,6 +300,7 @@ app.post('/api/verify-license', async (req, res) => {
     extra: {
       freemiusUid: freemiusResult.freemiusUid,
       freemiusInstallId: freemiusResult.freemiusInstallId,
+      freemiusInstallApiToken: freemiusResult.freemiusInstallApiToken,
       freemiusLicenseId: freemiusResult.freemiusLicenseId,
     },
   })
@@ -319,6 +326,7 @@ app.post('/api/verify-license', async (req, res) => {
     licenseKey: normalizedKey,
     freemiusUid: freemiusResult.freemiusUid,
     freemiusInstallId: freemiusResult.freemiusInstallId,
+    freemiusInstallApiToken: freemiusResult.freemiusInstallApiToken,
     freemiusLicenseId: freemiusResult.freemiusLicenseId,
     activatedAt: new Date().toISOString(),
   })
@@ -334,7 +342,7 @@ app.post('/api/license/activate', (req, res) => {
 // Gumroad: removes device from local DB only.
 // Freemius: releases Freemius install quota, then removes device from local DB.
 app.post('/api/deactivate-license', async (req, res) => {
-  const { licenseKey, deviceId, source, freemiusUid, freemiusInstallId } = req.body
+  const { licenseKey, deviceId, source, freemiusUid, freemiusInstallId, freemiusInstallApiToken, freemiusLicenseId } = req.body
 
   if (!licenseKey || !deviceId) {
     return res.status(400).json({ success: false, message: 'Missing licenseKey or deviceId.' })
@@ -376,7 +384,7 @@ app.post('/api/license/deactivate', (req, res) => {
 app.get('/api/health', (req, res) => {
   res.json({
     status: 'ok',
-    service: 'TweakShift Premium License Server',
+    service: 'TweakShift Classic License Server',
     gumroadConfigured: Boolean(GUMROAD_PRODUCT_ID && GUMROAD_ACCESS_TOKEN),
     freemiusConfigured: Boolean(FREEMIUS_PRODUCT_ID),
     timestamp: new Date().toISOString(),
@@ -384,11 +392,11 @@ app.get('/api/health', (req, res) => {
 })
 
 app.get('/', (req, res) => {
-  res.json({ ok: true, service: 'TweakShift Premium License Server' })
+  res.json({ ok: true, service: 'TweakShift Classic License Server' })
 })
 
 app.listen(PORT, () => {
-  console.log(`[TweakShift Premium License Server] Running on port ${PORT}`)
-  console.log(`[TweakShift Premium License Server] Gumroad: ${GUMROAD_PRODUCT_ID ? 'configured' : 'NOT SET'}`)
-  console.log(`[TweakShift Premium License Server] Freemius: ${FREEMIUS_PRODUCT_ID ? 'configured' : 'NOT SET'}`)
+  console.log(`[TweakShift Classic License Server] Running on port ${PORT}`)
+  console.log(`[TweakShift Classic License Server] Gumroad: ${GUMROAD_PRODUCT_ID ? 'configured' : 'NOT SET'}`)
+  console.log(`[TweakShift Classic License Server] Freemius: ${FREEMIUS_PRODUCT_ID ? 'configured' : 'NOT SET'}`)
 })
