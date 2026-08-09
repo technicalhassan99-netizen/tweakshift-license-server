@@ -31,6 +31,7 @@ const FREEMIUS_API_BASE     = 'https://api.freemius.com/v1'
 // Local JSON activation DB for Gumroad device binding + basic Freemius install tracking.
 // For bigger scale, move this to PostgreSQL/Redis later.
 const DB_PATH = path.join(__dirname, 'activations.json')
+const NOTIFICATIONS_PATH = path.join(__dirname, 'notifications.json')
 
 function loadDB() {
   try {
@@ -378,6 +379,91 @@ app.post('/api/deactivate-license', async (req, res) => {
 app.post('/api/license/deactivate', (req, res) => {
   req.url = '/api/deactivate-license'
   app._router.handle(req, res)
+})
+
+
+// ── Dashboard notifications ───────────────────────────────────────
+// Edit notifications.json in GitHub and deploy/auto-deploy this service.
+// The desktop app reads this endpoint and refreshes while it is running.
+function parseVersion(value) {
+  return String(value || '0.0.0')
+    .replace(/^v/i, '')
+    .split(/[.+-]/)
+    .slice(0, 3)
+    .map(part => Number.parseInt(part, 10) || 0)
+}
+
+function compareVersions(a, b) {
+  const av = parseVersion(a)
+  const bv = parseVersion(b)
+  for (let i = 0; i < 3; i += 1) {
+    if (av[i] > bv[i]) return 1
+    if (av[i] < bv[i]) return -1
+  }
+  return 0
+}
+
+function loadNotifications() {
+  try {
+    if (!fs.existsSync(NOTIFICATIONS_PATH)) return []
+    const parsed = JSON.parse(fs.readFileSync(NOTIFICATIONS_PATH, 'utf8'))
+    const raw = Array.isArray(parsed) ? parsed : parsed?.notifications
+    return Array.isArray(raw) ? raw : []
+  } catch (error) {
+    console.error('[Notifications] Could not read notifications.json:', error.message)
+    return []
+  }
+}
+
+app.get('/api/notifications', (req, res) => {
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate')
+  res.set('Pragma', 'no-cache')
+  res.set('Expires', '0')
+
+  const version = String(req.query.version || '').trim()
+  const platform = String(req.query.platform || '').trim().toLowerCase()
+  const now = Date.now()
+
+  const notifications = loadNotifications()
+    .filter(item => item && item.active !== false)
+    .filter(item => {
+      if (!item.expiresAt) return true
+      const expires = Date.parse(item.expiresAt)
+      return Number.isNaN(expires) || expires > now
+    })
+    .filter(item => {
+      if (!version) return true
+      if (item.minVersion && compareVersions(version, item.minVersion) < 0) return false
+      if (item.maxVersion && compareVersions(version, item.maxVersion) > 0) return false
+      return true
+    })
+    .filter(item => {
+      const platforms = Array.isArray(item.platforms) ? item.platforms.map(v => String(v).toLowerCase()) : []
+      return !platforms.length || !platform || platforms.includes(platform) || platforms.includes('all')
+    })
+    .sort((a, b) => {
+      const at = Date.parse(a.createdAt || a.date || '') || 0
+      const bt = Date.parse(b.createdAt || b.date || '') || 0
+      return bt - at
+    })
+    .slice(0, 20)
+    .map((item, index) => ({
+      id: String(item.id || `notice-${index + 1}`),
+      title: String(item.title || 'TweakShift Notice').slice(0, 100),
+      message: String(item.message || item.body || '').slice(0, 280),
+      type: ['info', 'update', 'bug', 'alert'].includes(String(item.type || '').toLowerCase())
+        ? String(item.type).toLowerCase()
+        : 'info',
+      createdAt: item.createdAt || item.date || null,
+      actionUrl: item.actionUrl || item.url || null,
+    }))
+
+  return res.json({
+    success: true,
+    notifications,
+    count: notifications.length,
+    generatedAt: new Date().toISOString(),
+  })
 })
 
 // ── GET /api/health ────────────────────────────────────────────────
