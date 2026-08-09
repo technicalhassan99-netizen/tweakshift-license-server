@@ -1,11 +1,11 @@
 {
   "notifications": [
     {
-      "id": "example-update",
-      "title": "TweakShift Update",
-      "message": "Example notification. Set active to true and edit this text when you want this notice to appear inside TweakShift Classic.",
+      "id": "notification-01",
+      "title": "TweakShift UI Improvement Update",
+      "message": "TweakShift Complete UI Improvement",
       "type": "update",
-      "active": false,
+      "active": true,
       "createdAt": "2026-08-09T00:00:00Z",
       "platforms": ["win32"]
     }
